@@ -161,14 +161,14 @@ function buildVocabQ(word, o) {
   const target = toEs ? word.es : word.fr;
   const alt = toEs ? word.esAlt : word.frAlt;
   let type = o.mode === 'adapt' ? (cardOf(word.id).box === 0 ? 'qcm' : 'input') : o.mode;
-  let choices = null;
+  let choices = null, correct = null;
   if (type === 'qcm') {
-    const others = [...new Set(S.words.filter(w => w.id !== word.id).map(w => (toEs ? w.es : w.fr)))].filter(x => x !== target);
-    if (others.length < 3) type = 'input';
-    else choices = shuffle([target, ...shuffle(others).slice(0, 3)]);
+    const c = qcmChoices(word, toEs, 3);
+    if (c.wrong.length < 3) type = 'input';
+    else { correct = c.correct; choices = shuffle([correct, ...c.wrong]); }
   }
   return {
-    type, choices, lang: toEs ? 'es' : 'fr',
+    type, choices, correct, lang: toEs ? 'es' : 'fr',
     label: toEs ? 'Traduis en espagnol' : 'Traduis en français',
     prompt: toEs ? word.fr : word.es,
     answer: target, note: word.note,
@@ -378,7 +378,7 @@ function runQuiz(cfg) {
     if (input) { input.disabled = true; input.classList.add(ok ? 'good' : 'bad'); }
     app.querySelectorAll('.choice').forEach((b, i) => {
       b.disabled = true;
-      if (cur.choices[i] === cur.answer) b.classList.add('good');
+      if (cur.choices[i] === (cur.correct || cur.answer)) b.classList.add('good');
       else if (i === chosenIdx) b.classList.add('bad');
     });
     const note = cur.note ? `<div class="note">${esc(cur.note)}</div>` : '';
@@ -414,13 +414,13 @@ function runQuiz(cfg) {
     if (e.target.closest('[data-next]')) return next();
     if (e.target.closest('[data-skip]') && !answered) return answer({ ok: false });
     const ch = e.target.closest('.choice');
-    if (ch && !answered) { const i = +ch.dataset.i; answer({ ok: cur.choices[i] === cur.answer }, i); }
+    if (ch && !answered) { const i = +ch.dataset.i; answer({ ok: cur.choices[i] === (cur.correct || cur.answer) }, i); }
   };
   keyHandler = e => {
     if (answered && e.key === 'Enter') { e.preventDefault(); next(); return; }
     if (!answered && cur && cur.type === 'qcm' && /^[1-4]$/.test(e.key)) {
       const i = +e.key - 1;
-      if (cur.choices[i] !== undefined) answer({ ok: cur.choices[i] === cur.answer }, i);
+      if (cur.choices[i] !== undefined) answer({ ok: cur.choices[i] === (cur.correct || cur.answer) }, i);
     }
   };
   next();

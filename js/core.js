@@ -160,6 +160,98 @@ function deleteWord(id) {
 }
 function listNames() { return [...new Set(S.words.map(w => w.list))]; }
 
+// ---------- Fausses réponses des QCM ----------
+const ES_ART = /^(el|la|los|las|un|una|unos|unas)\s+/i;
+const FR_ART = /^(?:(le|la|les|un|une|des)\s+|(l)')/i;
+// Nature du mot : verb, noun, adj, other (petits mots), expr, ou any si on ne sait pas.
+function catOf(w) {
+  if (w.cat) return w.cat;
+  const base = VOCAB.find(b => b.id === w.id);
+  if (base && base.cat) return base.cat;
+  const es = variants(w.es)[0] || '', fr = variants(w.fr)[0] || '';
+  if (/^[¿¡]/.test(es)) return 'expr';
+  if (ES_ART.test(es)) return 'noun';
+  if (/^\S+(ar|er|ir|ír)(se)?$/i.test(es) && /(er|ir|re)$/i.test(fr)) return 'verb';
+  if (/o\/a$/i.test(w.es.trim())) return 'adj';
+  if (/\s/.test(es)) return 'expr';
+  return 'any';
+}
+function nounStyle(text, lang) {
+  const m = text.match(lang === 'es' ? ES_ART : FR_ART);
+  if (!m) return { art: 'none', pl: false };
+  const a = (m[1] || m[2]).toLowerCase();
+  return { art: /^(un|una|une|unos|unas|des)$/.test(a) ? 'indef' : 'def', pl: /^(los|las|les|unos|unas|des)$/.test(a) };
+}
+const NO_PLURAL = ['fe', 'dinero', 'leche', 'carne', 'gente', 'lluvia', 'foi', 'argent', 'lait', 'viande', 'foule', 'pluie'];
+// Met un nom de la banque à la même forme que la bonne réponse (article, pluriel). null si pluriel incertain.
+function nounForm(n, lang, style) {
+  let word = lang === 'es' ? n.es : n.fr;
+  const fem = (lang === 'es' ? n.eg : n.fg) === 'f';
+  if (style.pl) {
+    if (/[\s-]/.test(word) || NO_PLURAL.includes(word)) return null;
+    if (lang === 'es') { if (!/[aeo]$/.test(word)) return null; }
+    else if (/(s|x|z|al|ail|au|eu|œil)$/.test(word)) return null;
+    word += 's';
+  }
+  if (style.art === 'none') return word;
+  let art;
+  if (lang === 'es') {
+    art = style.art === 'def' ? (style.pl ? (fem ? 'las' : 'los') : (fem ? 'la' : 'el')) : (style.pl ? (fem ? 'unas' : 'unos') : (fem ? 'una' : 'un'));
+  } else if (style.art === 'def') {
+    if (style.pl) art = 'les';
+    else if (/^[aeiouyhàâéèêîôûœ]/i.test(word)) return "l'" + word;
+    else art = fem ? 'la' : 'le';
+  } else art = style.pl ? 'des' : (fem ? 'une' : 'un');
+  return art + ' ' + word;
+}
+function simScore(a, b) {
+  a = stripAccents(coreText(a)); b = stripAccents(coreText(b));
+  let s = levenshtein(a, b) / Math.max(a.length, b.length, 1);
+  if (a[0] === b[0]) s -= 0.15;
+  if (a.slice(-2) === b.slice(-2)) s -= 0.1;
+  return s;
+}
+/* Renvoie { correct, wrong[] } : la bonne réponse sous sa forme courte et n fausses réponses
+   de même nature, tirées de la banque et des mots de l'utilisateur, en privilégiant celles qui ressemblent. */
+function qcmChoices(word, toEs, n) {
+  const side = toEs ? 'es' : 'fr', other = toEs ? 'fr' : 'es';
+  const target = word[side], correct = variants(target)[0] || target;
+  const cat = catOf(word);
+  const style = nounStyle(correct, side);
+  let cands = [];
+  const cats = cat === 'any' ? Object.keys(BANK) : [cat];
+  cats.forEach(c => (BANK[c] || []).forEach(b => {
+    const text = c === 'noun' ? nounForm(b, side, cat === 'noun' ? style : { art: 'none', pl: false }) : variants(b[side])[0];
+    if (text) cands.push({ text, tr: b[other] });
+  }));
+  S.words.forEach(w => {
+    if (w.id === word.id || (cat !== 'any' && catOf(w) !== cat)) return;
+    const text = variants(w[side])[0];
+    if (!text) return;
+    if (cat === 'noun') { const st = nounStyle(text, side); if (st.art !== style.art || st.pl !== style.pl) return; }
+    cands.push({ text, tr: w[other] });
+  });
+  // Écarte les synonymes : une proposition qui serait elle-même une bonne réponse.
+  const seen = new Set([coreText(correct)]);
+  cands = cands.filter(c => {
+    const k = coreText(c.text);
+    if (seen.has(k)) return false;
+    if (checkAnswer(c.text, [target, word[side + 'Alt']]).ok) return false;
+    if (variants(c.tr).some(v => checkAnswer(v, [word[other], word[other + 'Alt']]).ok)) return false;
+    seen.add(k);
+    return true;
+  });
+  // Une question ne se mélange pas avec des non-questions : ça se repérerait d'un coup d'œil.
+  const isQ = t => /^¿|\?\s*$/.test(t);
+  const sameShape = cands.filter(x => isQ(x.text) === isQ(correct));
+  if (sameShape.length >= n) cands = sameShape;
+  cands.sort((a, b) => simScore(a.text, correct) - simScore(b.text, correct));
+  // 2 parmi les plus ressemblantes, le reste parmi les suivantes : proche, mais pas toujours les mêmes.
+  const near = shuffle(cands.slice(0, 6)), far = shuffle(cands.slice(6, 30));
+  const wrong = near.slice(0, Math.min(2, n)).concat(far).concat(near.slice(2)).slice(0, n).map(c => c.text);
+  return { correct, wrong };
+}
+
 // ---------- Conjugaison ----------
 function conjugate(v, tense) {
   const inf = v.inf, grp = inf.slice(-2), stem = inf.slice(0, -2);
